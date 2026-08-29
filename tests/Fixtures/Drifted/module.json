@@ -1,0 +1,10 @@
+{
+    "name": "ground-drifted",
+    "solves": "ground.drifted",
+    "requires": ["AlfacodeTeam\\PhpServicePlatform\\Kernel\\Ports\\DatabasePort"],
+    "exposes": ["Plugins\\Ground\\Tests\\Fixtures\\Drifted\\GhostContract"],
+    "routes": [
+        { "method": "GET", "path": "/gone", "handler": "Plugins\\Ground\\Tests\\Fixtures\\Drifted\\Ghost@index" }
+    ],
+    "config": []
+}
