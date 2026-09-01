@@ -14,6 +14,7 @@ use Plugins\Ground\Commands\MakeGroundTestCommand;
 use Plugins\Ground\Commands\MakeUiTestCommand;
 use Plugins\Ground\Commands\PluginCheckCommand;
 use Plugins\Ground\Commands\PluginProbeCommand;
+use Plugins\Ground\Commands\PluginServeCommand;
 
 /**
  * Ground — a test bench for developing and testing plugins.
@@ -66,6 +67,7 @@ final class Provider implements ModuleContract
     {
         $cli->command(PluginCheckCommand::class);
         $cli->command(PluginProbeCommand::class);
+        $cli->command(PluginServeCommand::class);
         $cli->command(MakeGroundTestCommand::class);
         $cli->command(MakeUiTestCommand::class);
     }

@@ -20,6 +20,15 @@ final class FakeQueue implements QueuePort
     /** The secret FakeQueue signs payloads with — pass it to any signature check under test. */
     public const SECRET = 'ground-fake-queue-secret';
 
+    /**
+     * The attempt budget stamped on every pushed payload.
+     *
+     * It is part of the SIGNED material, so it cannot be an inline literal in
+     * two places: push() signing one number while the payload carries another
+     * produces an envelope that verifies against nothing.
+     */
+    public const MAX_ATTEMPTS = 3;
+
     /** @var array<string, list<JobPayload>> queue name => pending payloads */
     private array $queues = [];
 
@@ -49,11 +58,14 @@ final class FakeQueue implements QueuePort
             data:        $payload,
             queue:       $queue,
             attempts:    0,
-            maxAttempts: 3,
+            maxAttempts: self::MAX_ATTEMPTS,
             enqueuedAt:  new \DateTimeImmutable('now', new \DateTimeZone('UTC')),
-            // A signature over the data with a known secret, so a test can drive
-            // ValidateSignatureStage without hand-rolling the HMAC.
-            signature:   hash_hmac('sha256', (string) json_encode($payload), self::SECRET),
+            // Signed THROUGH THE KERNEL's own signer, never a hand-rolled HMAC.
+            // The kernel signs jobId|jobClass|queue|maxAttempts|canonical(data);
+            // an HMAC over the data alone verifies against nothing, so every
+            // payload this fake produced was silently signature-INVALID and a
+            // plugin testing a signed queue could not get a passing run.
+            signature:   JobPayload::sign(self::SECRET, $id, $jobClass, $payload, $queue, self::MAX_ATTEMPTS),
         );
 
         return $id;

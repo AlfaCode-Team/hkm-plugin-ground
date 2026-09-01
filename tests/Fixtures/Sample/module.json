@@ -65,6 +65,11 @@
             "name": "ground.sample.failing",
             "handler": "Plugins\\Ground\\Tests\\Fixtures\\Sample\\FailingJob",
             "queue": "sample-retry"
+        },
+        {
+            "name": "ground.sample.signed",
+            "handler": "Plugins\\Ground\\Tests\\Fixtures\\Sample\\SignedJob",
+            "queue": "sample-signed"
         }
     ]
 }

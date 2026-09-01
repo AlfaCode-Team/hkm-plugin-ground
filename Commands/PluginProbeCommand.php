@@ -21,27 +21,30 @@ use Plugins\Ground\Inspection\PluginLocator;
  */
 final class PluginProbeCommand extends AbstractCommand
 {
+    use ResolvesPlugin;
+
     protected function configure(): void
     {
         $this->name        = 'plugin:probe';
         $this->description = 'Boot a plugin in an isolated ground and report what compiled';
 
-        $this->addArgument('name', 'Plugin name from module.json', required: true);
+        $this->addArgument('name', 'Plugin name (default: the plugin you are standing in)');
         $this->addOption('routes', 'r', 'List every compiled route');
         $this->addOption('keep', 'k', 'Keep the temp workspace and print its path');
+        $this->addOption('path', 'p', 'Search from this directory instead of the working directory', acceptsValue: true);
+        $this->addOption('here', 'H', 'Only this directory and its plugins/ — skip sibling repos');
     }
 
     protected function handle(): int
     {
-        $name    = (string) $this->argument('name');
-        $locator = PluginLocator::fromCwd();
-        $target  = $locator->find($name);
+        $target = $this->resolvePlugin();
 
         if ($target === null) {
-            $this->error("No plugin named '{$name}' under plugins/ or modules/.");
-
             return self::FAILURE;
         }
+
+        $locator = $this->locator();
+        $name    = $target->name();
 
         // A plugin whose requires[] are unregistered cannot boot — that is the
         // kernel's rule, not a harness limitation. Resolving the closure here
@@ -155,53 +158,25 @@ final class PluginProbeCommand extends AbstractCommand
     /**
      * Providers for every domain in requires[], transitively.
      *
+     * The walk itself lives on {@see PluginLocator::dependenciesFor()} because
+     * `plugin:serve` needs exactly the same answer, and two copies of a
+     * transitive-dependency walk is two chances to disagree about what a plugin
+     * needs to boot.
+     *
      * @return list<class-string>|null null when a required domain has no
      *                                 installed provider — reported, not guessed.
      */
     private function resolveDependencies(PluginManifest $target, PluginLocator $locator): ?array
     {
-        $byDomain = [];
-        foreach ($locator->all() as $manifest) {
-            if ($manifest->solves() !== '') {
-                $byDomain[$manifest->solves()] ??= $manifest;
-            }
-        }
-
-        $resolved = [];
-        $missing  = [];
-
-        // Route-level requires[] as well as module-level. They are just as hard
-        // a boot dependency — the route compiler validates every one and fails
-        // on an unknown domain — but they never appear in the module's own
-        // requires[], so walking only that missed Auth's http.pageflow and the
-        // probe reported a boot failure it had caused itself.
-        $queue = [...$target->requires(), ...$target->routeRequires()];
-
-        while ($queue !== []) {
-            $domain = array_shift($queue);
-
-            if ($domain === $target->solves() || isset($resolved[$domain])) {
-                continue;
-            }
-
-            $manifest = $byDomain[$domain] ?? null;
-            if ($manifest === null) {
-                $missing[] = $domain;
-
-                continue;
-            }
-
-            $resolved[$domain] = $manifest->providerClass;
-            $queue = [...$queue, ...$manifest->requires(), ...$manifest->routeRequires()];
-        }
+        ['providers' => $providers, 'missing' => $missing] = $locator->dependenciesFor($target);
 
         if ($missing !== []) {
-            $this->error('No installed plugin provides: ' . implode(', ', array_unique($missing)));
+            $this->error('No installed plugin provides: ' . implode(', ', $missing));
             $this->muted('Install them, or fix the requires[] entry — it must name a module\'s solves domain.');
 
             return null;
         }
 
-        return array_values($resolved);
+        return $providers;
     }
 }

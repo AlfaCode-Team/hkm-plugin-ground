@@ -177,6 +177,44 @@ final class UiTest extends PluginGroundTestCase
         self::assertFalse($ui->hasPages());
     }
 
+    /**
+     * A PHP source directory is not a frontend, even when it is spelled `Ui/`.
+     *
+     * macOS and Windows match `Ui/` when the code asks for `ui/`, so a plugin
+     * with a `Plugins\X\Ui\` namespace — this package has one — was reported as
+     * shipping an undeclared frontend, with a `ui.no-manifest` warning no edit
+     * could clear. And because Linux answers differently, CI and a laptop
+     * disagreed about whether the same plugin was clean.
+     */
+    public function testAPhpSourceDirectoryNamedUiIsNotMistakenForAFrontend(): void
+    {
+        $root = $this->tempDir();
+        mkdir($root . '/ui', 0o700, true);
+        file_put_contents($root . '/ui/PageResolver.php', "<?php\nfinal class PageResolver {}\n");
+
+        self::assertFalse(
+            UiManifest::for($root)->exists,
+            'A directory holding only PHP is a namespace, not a UI.',
+        );
+    }
+
+    public function testADirectoryWithSurfacePagesIsAFrontendEvenWithoutUiJson(): void
+    {
+        $root = $this->tempDir();
+        mkdir($root . '/ui/admin/Pages', 0o700, true);
+
+        self::assertTrue(UiManifest::for($root)->exists);
+    }
+
+    public function testAnEntryFileAloneIsEnoughToCountAsAFrontend(): void
+    {
+        $root = $this->tempDir();
+        mkdir($root . '/ui', 0o700, true);
+        file_put_contents($root . '/ui/index.ts', "export {};\n");
+
+        self::assertTrue(UiManifest::for($root)->exists);
+    }
+
     // ── Route filters ─────────────────────────────────────────────────────────
 
     public function testUnregisteredFilterAliasesAreStubbedAndReported(): void

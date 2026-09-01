@@ -17,41 +17,101 @@ use Plugins\Ground\Inspection\PluginLocator;
  */
 final class PluginCheckCommand extends AbstractCommand
 {
+    use ResolvesPlugin;
+
     protected function configure(): void
     {
         $this->name        = 'plugin:check';
         $this->description = 'Check a plugin against the GDA rules the boot cannot catch';
 
-        $this->addArgument('name', 'Plugin name from module.json (omit to check all)');
+        $this->addArgument('name', 'Plugin name (default: the plugin you are standing in)');
+        $this->addOption('all', 'a', 'Check every installed plugin');
         $this->addOption('strict', 's', 'Treat warnings as failures too');
         $this->addOption('json', 'j', 'Machine-readable output');
+        $this->addOption('path', 'p', 'Search from this directory instead of the working directory', acceptsValue: true);
+        $this->addOption('here', 'H', 'Only this directory and its plugins/ — skip sibling repos');
     }
 
     protected function handle(): int
     {
-        $locator = PluginLocator::fromCwd();
-        $name    = (string) ($this->argument('name') ?? '');
+        $locator = $this->locator();
+        $targets = $this->targets($locator);
 
-        $targets = $name === '' ? $locator->all() : array_filter([$name => $locator->find($name)]);
-
-        if ($targets === []) {
-            $this->error(
-                $name === ''
-                    ? 'No plugins found under plugins/ or modules/.'
-                    : "No plugin named '{$name}'. Run `plugin:check` with no argument to list what is installed.",
-            );
-
+        if ($targets === null) {
             return self::FAILURE;
         }
 
+        // The whole workspace, so the inspector can tell a variable nobody reads
+        // from one a REQUIRED plugin reads. Resolved once, outside the loop —
+        // the locator memoizes its scan, but the intent is worth stating.
+        $neighbours = $locator->byDomain();
+
         $results = [];
         foreach ($targets as $pluginName => $manifest) {
-            $results[$pluginName] = (new Inspector($manifest))->run();
+            $results[$pluginName] = (new Inspector($manifest, $neighbours))->run();
         }
 
         return $this->hasOption('json')
             ? $this->renderJson($results)
             : $this->renderHuman($results);
+    }
+
+    /**
+     * What to check: this plugin, a named one, or everything.
+     *
+     * Bare `plugin:check` used to mean EVERY installed plugin, which from
+     * inside a plugin you are working on prints 31 reports and buries the one
+     * you asked about. It now means "this one", and `--all` is the sweep. From
+     * a project, where the working directory is not a plugin, bare still means
+     * all — there is nothing else it could sensibly mean there.
+     *
+     * @return array<string, PluginManifest>|null null after reporting why
+     */
+    private function targets(PluginLocator $locator): ?array
+    {
+        if ($this->hasOption('all')) {
+            $all = $locator->all();
+
+            if ($all === []) {
+                $this->error('No plugins found.');
+                $this->muted('Searched:');
+                foreach ($locator->searchedPaths() as $glob) {
+                    $this->muted('  ' . $glob);
+                }
+
+                return null;
+            }
+
+            return $all;
+        }
+
+        $name = trim((string) ($this->argument('name') ?? ''));
+
+        if ($name === '' && $locator->current() === null) {
+            return $this->targetsFromWholeWorkspace($locator);
+        }
+
+        $target = $this->resolvePlugin();
+
+        return $target === null ? null : [$target->name() => $target];
+    }
+
+    /** @return array<string, PluginManifest>|null */
+    private function targetsFromWholeWorkspace(PluginLocator $locator): ?array
+    {
+        $all = $locator->all();
+
+        if ($all === []) {
+            $this->error('No plugins found, and this directory is not a plugin.');
+            $this->muted('Searched:');
+            foreach ($locator->searchedPaths() as $glob) {
+                $this->muted('  ' . $glob);
+            }
+
+            return null;
+        }
+
+        return $all;
     }
 
     /** @param array<string, list<Finding>> $results */

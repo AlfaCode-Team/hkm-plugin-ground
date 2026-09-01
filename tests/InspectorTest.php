@@ -227,14 +227,116 @@ final class InspectorTest extends TestCase
         return array_map(static fn(Finding $f): string => $f->code, $findings);
     }
 
-    /** @return list<Finding> */
-    private function inspect(string $dir): array
+    // ── Variables a DEPENDENCY owns ───────────────────────────────────────────
+
+    /**
+     * `user` declares HASH_BCRYPT_COST and never reads it, because `crypto` —
+     * which it requires — does. Calling that "no source file reads it" is true
+     * of this plugin's files and false about the system, and it sends someone
+     * to delete a line that is doing a job.
+     */
+    public function testAVariableReadByAREQUIREDPluginIsNotReportedAsUnread(): void
+    {
+        $dir = $this->plugin(
+            ['requires' => ['crypto.services'], 'config' => [['key' => 'HASH_BCRYPT_COST', 'type' => 'int']]],
+            [],
+        );
+
+        $codes = $this->codes($this->inspect($dir, $this->neighbour('crypto', 'crypto.services', ['HASH_BCRYPT_COST'])));
+
+        self::assertContains('config.dependency-var', $codes);
+        self::assertNotContains('config.unused', $codes);
+    }
+
+    public function testTheNoteNamesThePluginThatOwnsTheVariable(): void
+    {
+        $dir = $this->plugin(
+            ['requires' => ['crypto.services'], 'config' => [['key' => 'HASH_BCRYPT_COST', 'type' => 'int']]],
+            [],
+        );
+
+        $findings = $this->inspect($dir, $this->neighbour('crypto', 'crypto.services', ['HASH_BCRYPT_COST']));
+        $note     = array_values(array_filter(
+            $findings,
+            static fn(Finding $f): bool => $f->code === 'config.dependency-var',
+        ))[0] ?? null;
+
+        self::assertNotNull($note);
+        self::assertStringContainsString('[crypto]', $note->message);
+    }
+
+    /** A plugin that is installed but NOT required does not excuse the variable. */
+    public function testAVariableOwnedByAPluginThisOneDoesNotRequireIsStillUnread(): void
+    {
+        $dir = $this->plugin(
+            ['requires' => [], 'config' => [['key' => 'HASH_BCRYPT_COST', 'type' => 'int']]],
+            [],
+        );
+
+        $codes = $this->codes($this->inspect($dir, $this->neighbour('crypto', 'crypto.services', ['HASH_BCRYPT_COST'])));
+
+        self::assertContains('config.unused', $codes);
+        self::assertNotContains('config.dependency-var', $codes);
+    }
+
+    /** Transitively, because requires[] is a graph and not a list. */
+    public function testItLooksThroughAChainOfDependencies(): void
+    {
+        $dir = $this->plugin(
+            ['requires' => ['mid.domain'], 'config' => [['key' => 'DEEP_VAR', 'type' => 'string']]],
+            [],
+        );
+
+        $neighbours = [
+            ...$this->neighbour('mid', 'mid.domain', [], requires: ['deep.domain']),
+            ...$this->neighbour('deep', 'deep.domain', ['DEEP_VAR']),
+        ];
+
+        self::assertContains('config.dependency-var', $this->codes($this->inspect($dir, $neighbours)));
+    }
+
+    /** With no workspace to consult, the old conclusion is the only honest one. */
+    public function testWithNoNeighboursItStillReportsTheVariableAsUnread(): void
+    {
+        $dir = $this->plugin(
+            ['requires' => ['crypto.services'], 'config' => [['key' => 'HASH_BCRYPT_COST', 'type' => 'int']]],
+            [],
+        );
+
+        self::assertContains('config.unused', $this->codes($this->inspect($dir)));
+    }
+
+    /**
+     * One neighbour, as the locator's byDomain() index shapes it.
+     *
+     * @param  list<string>                  $configKeys
+     * @param  list<string>                  $requires
+     * @return array<string, PluginManifest>
+     */
+    private function neighbour(string $name, string $solves, array $configKeys, array $requires = []): array
+    {
+        $dir = $this->plugin([
+            'name'     => $name,
+            'solves'   => $solves,
+            'requires' => $requires,
+            'config'   => array_map(static fn(string $k): array => ['key' => $k], $configKeys),
+        ], []);
+
+        return [$solves => PluginManifest::fromPath('Ground\\Neighbour\\Provider', $dir . '/module.json')];
+    }
+
+    /**
+     * @param  array<string, PluginManifest> $neighbours
+     * @return list<Finding>
+     */
+    private function inspect(string $dir, array $neighbours = []): array
     {
         // A provider class-string that does not exist: the provider checks
         // report that (and the test ignores it) while the file-scanning checks
         // still run over the temp directory.
         return (new Inspector(
             PluginManifest::fromPath('Ground\\Temp\\Provider', $dir . '/module.json'),
+            $neighbours,
         ))->run();
     }
 

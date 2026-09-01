@@ -55,5 +55,6 @@ final class Provider implements ModuleContract
 
     public function boot(HttpPipeline $http, CliPipeline $cli, WorkerPipeline $worker, EventBus $events): void
     {
+        $cli->command(SampleCommand::class);
     }
 }

@@ -486,9 +486,19 @@ final class BootedGround
             data:        $data,
             queue:       'default',
             attempts:    $attempts,
-            maxAttempts: 3,
+            maxAttempts: Fakes\FakeQueue::MAX_ATTEMPTS,
             enqueuedAt:  new \DateTimeImmutable('now', new \DateTimeZone('UTC')),
-            signature:   hash_hmac('sha256', (string) json_encode($data), Fakes\FakeQueue::SECRET),
+            // Signed through the kernel's own signer — see FakeQueue::push().
+            // A handler that verifies its own payload must be able to, and a
+            // hand-rolled HMAC here would make that impossible for no reason.
+            signature:   JobPayload::sign(
+                Fakes\FakeQueue::SECRET,
+                'ground-job',
+                $jobClass,
+                $data,
+                'default',
+                Fakes\FakeQueue::MAX_ATTEMPTS,
+            ),
         );
 
         $job = $this->container()->makeInScope($jobClass, $this->manifest->solves());

@@ -27,7 +27,7 @@ final class UiManifest
         $dir  = rtrim($pluginDirectory, '/') . '/ui';
         $path = $dir . '/ui.json';
 
-        if (!is_dir($dir)) {
+        if (!self::isUiDirectory($dir)) {
             return new self($dir, [], false);
         }
 
@@ -44,6 +44,34 @@ final class UiManifest
         }
 
         return new self($dir, $decoded, true);
+    }
+
+    /**
+     * Is this actually a UI directory, or a PHP source directory that a
+     * case-insensitive filesystem is pretending is one?
+     *
+     * macOS and Windows match `Ui/` when asked for `ui/`. A plugin with a
+     * `Plugins\X\Ui\` PHP namespace — this package has one — therefore looked
+     * like a plugin shipping an undeclared frontend, and `plugin:check` reported
+     * a `ui.no-manifest` warning that no edit to the plugin could clear. Worse,
+     * the same code produced a DIFFERENT answer on Linux, so a CI gate and a
+     * developer's laptop disagreed about whether the plugin was clean.
+     *
+     * So the directory has to look like a UI: a ui.json, an entry file, or a
+     * surface with pages in it. Anything else is a namespace that happens to
+     * collide, and is left alone.
+     */
+    private static function isUiDirectory(string $dir): bool
+    {
+        if (!is_dir($dir)) {
+            return false;
+        }
+
+        if (is_file($dir . '/ui.json') || is_file($dir . '/index.ts') || is_file($dir . '/index.tsx')) {
+            return true;
+        }
+
+        return glob($dir . '/*/Pages', GLOB_ONLYDIR) !== [];
     }
 
     public function path(): string

@@ -42,14 +42,27 @@ final class Inspector
 
     public function __construct(
         private readonly PluginManifest $manifest,
+        /**
+         * Every OTHER installed plugin, keyed by the domain it solves.
+         *
+         * Optional, and empty is a supported mode — the inspector's job is to
+         * read ONE plugin, and it must still work when nothing else is
+         * installed. What the neighbours buy is the difference between "no
+         * source file reads this variable" and "this variable is read by the
+         * plugin you declared a dependency on", which are opposite conclusions
+         * drawn from the same fact.
+         *
+         * @var array<string, PluginManifest>
+         */
+        private readonly array $neighbours = [],
     ) {}
 
     /**
      * @param class-string $providerClass
      */
-    public static function forProvider(string $providerClass): self
+    public static function forProvider(string $providerClass, array $neighbours = []): self
     {
-        return new self(PluginManifest::of($providerClass));
+        return new self(PluginManifest::of($providerClass), $neighbours);
     }
 
     /** @return list<Finding> */
@@ -354,15 +367,78 @@ final class Inspector
         }
 
         foreach ($declared as $key) {
-            if (!isset($used[$key])) {
+            if (isset($used[$key])) {
+                continue;
+            }
+
+            // Before calling it unread, ask whether a plugin this one DEPENDS ON
+            // declares it. `user` declares HASH_BCRYPT_COST and never reads it,
+            // because `crypto` — which it requires — does. Reporting that as
+            // "no source file reads it" is true of this plugin's files and
+            // false about the system, and it sends someone to delete a line
+            // that is doing a job.
+            $owner = $this->dependencyDeclaring($key);
+
+            if ($owner !== null) {
                 $this->add(Finding::note(
-                    'config.unused',
-                    "config[] declares {$key}, which no source file reads.",
-                    'Harmless, but a required entry still blocks the boot until someone sets it.',
+                    'config.dependency-var',
+                    "config[] declares {$key}, which is read by [{$owner}] — a plugin this one requires.",
+                    'Legitimate: re-declaring it means `hkm plugins enable` seeds it into the '
+                    . 'project .env even when the operator enables this plugin alone. Drop it only '
+                    . 'if you would rather the dependency own it.',
                     $this->manifest->path,
                 ));
+
+                continue;
             }
+
+            $this->add(Finding::note(
+                'config.unused',
+                "config[] declares {$key}, which no source file reads.",
+                'Harmless, but a required entry still blocks the boot until someone sets it.',
+                $this->manifest->path,
+            ));
         }
+    }
+
+    /**
+     * The name of a plugin this one requires (transitively) that declares $key.
+     *
+     * Declaration, not usage, is the signal: a plugin that declares a variable
+     * in its config[] is the plugin that owns it, and reading its whole source
+     * tree to confirm would cost a full scan per key for an answer the manifest
+     * already gives.
+     */
+    private function dependencyDeclaring(string $key): ?string
+    {
+        if ($this->neighbours === []) {
+            return null;
+        }
+
+        $seen  = [];
+        $queue = [...$this->manifest->requires(), ...$this->manifest->routeRequires()];
+
+        while ($queue !== []) {
+            $domain = array_shift($queue);
+
+            if (isset($seen[$domain])) {
+                continue;
+            }
+            $seen[$domain] = true;
+
+            $neighbour = $this->neighbours[$domain] ?? null;
+            if ($neighbour === null) {
+                continue;
+            }
+
+            if (\in_array($key, array_column($neighbour->configVars(), 'key'), true)) {
+                return $neighbour->name();
+            }
+
+            $queue = [...$queue, ...$neighbour->requires(), ...$neighbour->routeRequires()];
+        }
+
+        return null;
     }
 
     /**

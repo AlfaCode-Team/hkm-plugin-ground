@@ -22,12 +22,67 @@ $ground->service(TaskServiceContract::class);  // resolved in the plugin's scope
 $ground->destroy();
 ```
 
-## Install
+## Getting started
 
 ```bash
+cd ~/…/PLUGINS/PHP/hkm-plugin-user
+
+ground              # where am I, and what can I do
+ground install      # dependencies, from the checkouts next door
+ground check        # is this plugin well-formed
+ground test         # run its tests
+ground serve        # browse it at http://127.0.0.1:8321
+```
+
+Six verbs, no arguments. **The plugin is the one you are standing in** — naming
+one is for reaching a different plugin (`ground check view`). It works from
+`ui/` and `tests/` too, not just the top of the repo.
+
+`ground` lives at `bin/ground` in this repo. Put it on your PATH:
+
+```bash
+alias ground='~/…/PLUGINS/PHP/hkm-plugin-ground/bin/ground'
+```
+
+Running it with no arguments tells you the state of the plugin you are in and
+what to do next:
+
+```
+  user  —  user.management
+
+  installed   yes
+  routes      31
+  requires    database.management, crypto.services, cache.redis, …
+  ui          5 page(s)
+
+  install     dependencies, from the checkouts next door
+  check       static checks — the mistakes a boot cannot catch
+  probe       boot it and report what compiled
+  serve       browse it at http://127.0.0.1:8321
+  test        phpunit, and vitest if there are page tests
+  new test    scaffold tests from module.json  (new ui-test for pages)
+```
+
+### The five verbs
+
+| | |
+|---|---|
+| `ground install` | composer from the sibling checkouts, plus the UI test setup and `npm install` if the plugin ships pages. One command, from nothing to running tests. |
+| `ground check` | static conformance — manifest drift, undeclared `env()`, unbound contracts, access-rule violations. Exits 1 on any error, so it gates CI. Add `--all` for every plugin. |
+| `ground probe` | boot it on a real kernel and report what compiled: routes, events, whether every exposed contract resolves. |
+| `ground serve` | the real `HttpPipeline` behind `php -S`, against fake ports. Ctrl-C to stop. |
+| `ground test` | `phpunit`, then `vitest` if there are page tests. |
+| `ground new test` | scaffold tests from `module.json` — one per route, contract and event, with `dependencies()` already filled in. `ground new ui-test` for the page components. |
+
+Anything `ground` does not recognise is passed to the kernel CLI, so the long
+forms and every flag still work: `ground plugin:check --json`, `ground list`,
+`ground help plugin:serve`. Inside a project they are reached through `hkm`
+under those same names.
+
+### Using the harness in a test
+
+```php
 composer require --dev alfacode-team/hkm-plugin-ground
-# or, from a project:
-hkm plugins add ground
 ```
 
 **Keep it in `require-dev`.** It binds nothing at runtime and cannot break a
@@ -405,6 +460,83 @@ fired.
 
 ---
 
+## Reference — the long forms, and where plugins are found
+
+Inside a project the commands come from the kernel's CLI (`hkm plugin:check`).
+While DEVELOPING plugins there is usually no project to run them from, so this
+package ships its own entry point:
+
+```bash
+ground check                  # == ground plugin:check
+ground probe view --routes    # == ground plugin:probe view --routes
+ground serve                  # == ground plugin:serve
+```
+
+`bin/ground` boots a real kernel in a throwaway workspace and runs the same
+commands the kernel would. The **working directory is left alone** — that is how
+you choose which plugins are in scope.
+
+### `ground install` — what it actually does
+
+Every plugin declares its siblings through `vcs` repositories pointing at
+private GitHub repos, so `composer install` on a fresh checkout stops at
+`Could not authenticate against github.com` and nothing can be tested. That is
+the wrong failure to hit while developing: the code you want to test against is
+not on GitHub at all, it is the checkout in the directory beside this one, with
+your unpushed changes in it.
+
+```bash
+ground install          # this, for a plugin's PHP and UI dependencies
+bin/link-local          # the PHP half alone — what CI calls
+```
+
+It writes **`composer.local.json`** — the same manifest with `path` repositories
+— and installs through `COMPOSER=composer.local.json`. The tracked
+`composer.json` is never touched, which is the point: a released install must
+still resolve from GitHub for everyone else, and a local convenience that
+rewrites the manifest gets committed by accident within a week. Add
+`composer.local.*` to `.gitignore` and the arrangement is invisible.
+
+It also adds `hkm-plugin-ground` to require-dev **in that local file only**, so a
+plugin that has never been tested can run a scaffolded ground test immediately
+instead of failing on a missing dev dependency. When you decide to keep the
+tests, add the require-dev for real.
+
+`HKM_KERNEL_PATH` and `HKM_PLUGINS_PATH` override where it looks.
+
+### Discovery
+
+Four layouts, searched **nearest-first**, so the copy you are editing beats a
+sibling or a vendored release of the same plugin:
+
+| # | Looked at | The layout it serves |
+|---|---|---|
+| 1 | the directory itself | you are standing INSIDE a plugin repo |
+| 2 | `plugins/*`, `modules/*` | a project or the kernel checkout |
+| 3 | the **parent's** children, and its `plugins/`, `modules/` | a plugin-development workspace, every plugin a sibling repo |
+| 4 | `vendor/*/*` | plugins installed the ordinary way |
+
+Layer 3 is what makes cross-plugin work possible before anything is published:
+`plugin:probe user` resolves `auth.identity`, `view.rendering` and nine more to
+the checkouts next door instead of demanding a `composer install`.
+
+A sibling repo is in nobody's composer autoloader and never will be — it is a
+different package with its own `vendor/`. So each discovered plugin gets a PSR-4
+mapping registered from the namespace in its `Provider.php` to its own
+directory: the same `"Plugins\\X\\": ""` every one of these plugins declares in
+its own `composer.json`. The autoloader is **appended**, so a properly installed
+plugin still resolves through composer and nothing is shadowed.
+
+```bash
+--path <dir>   search from there instead of the working directory
+--here         only this directory and its plugins/ — skip sibling repos (for CI)
+```
+
+When nothing is found, the commands print **the globs they used**. A plugin repo
+one directory off looks identical to one that is not there at all.
+
+---
+
 ## Static checks — `plugin:check`
 
 ```bash
@@ -467,6 +599,98 @@ when enabling the plugin, without having to wire a project up to see it.
 
 ---
 
+## Browse it — `plugin:serve`
+
+```bash
+ground plugin:serve user                       # http://127.0.0.1:8321
+ground plugin:serve user --port=9000
+ground plugin:serve user --with=session,security-filters
+```
+
+`plugin:check` reads the plugin, `plugin:probe` boots it, and this **serves** it:
+the real `HttpPipeline` behind PHP's built-in server, against the same fake ports
+every ground test uses. It is the third question a plugin author asks, and until
+now the only one that needed a whole project wired up first.
+
+It proves, cheaply: the route compiles, matches and reaches its handler; the
+controller, service and view actually run; the markup, layout, assets and
+Pageflow page object are what you expect; and when something breaks, the failure
+arrives in the browser with a real stack trace.
+
+**Every port is a fake.** The database returns whatever it was seeded with —
+nothing, by default — mail goes nowhere and the cache is per-request. A page that
+reads from storage renders empty here and is not broken.
+
+`--with` loads plugins nothing *declares* a dependency on but a page still needs;
+`session` and `security-filters` are the usual pair. Without SecurityFilters, a
+route naming the `auth` filter is served with a pass-through stand-in — exactly
+the wrong thing to debug an auth problem against.
+
+The server **boots per request** (~35 ms), because `php -S` re-executes its
+router each time. That is the behaviour you want while editing: every reload
+picks up the code *and* the `module.json` you just saved, with nothing to
+restart. A route added to `module.json` is live on refresh.
+
+---
+
+## Checking the UI — `make:ui-test`
+
+PHP can prove a route returns `{component, props}` and that a page file exists
+for it (`assertRendersPage`). It cannot prove the component **renders**. That
+needs a DOM, and a DOM needs node.
+
+```bash
+cd ~/…/PLUGINS/PHP/hkm-plugin-user
+../hkm-plugin-ground/bin/ground make:ui-test user --config   # tests + vitest config + package.json
+cd ui && npm install                                         # once
+npx vitest                                                   # or: npm test
+```
+
+`--config` writes a **runnable** setup: a `package.json` with every npm package
+the pages actually reach for, and a `vitest.config.ts` whose aliases point at
+the sibling checkouts on disk — `@pageflow/react`, `@pageflow/admin`, `@ui/*`,
+`@lib`, `@providers`, and the plugin's own `@user`. Those aliases normally exist
+only after `hkm ui sync` has federated everything into a project's `frontend/`,
+which is why a plugin's UI was previously uncheckable until a project existed.
+They are derived from the same `ui.json` and `package.json` declarations `hkm ui
+sync` reads, and written **relative** to the config, so the file is committable
+rather than pinned to one machine.
+
+### Fixtures are dumped, not written
+
+The component test reads its props from `ui/__fixtures__/<page>.json`, which a
+**ground test dumps from a real response**:
+
+```php
+$this->ground()->pageflow('/admin/users')
+    ->writeFixture(__DIR__ . '/../ui/__fixtures__/user-index.json');
+```
+
+That is the whole point. Hand-written mock props drift from the server the
+moment a field is renamed — the mock is updated by whoever wrote it, or never —
+and the component test keeps passing while the page breaks in the browser. With
+a dump, a server-side rename changes the file and fails the component test.
+
+A page with no fixture yet gets a **placeholder**, and its tests report as
+skipped with the reason in the file:
+
+```
+ ✓ __tests__/user-index.test.tsx (3 tests)
+ ↓ __tests__/user-profile.test.tsx (3 tests | 3 skipped)
+```
+
+Commit `__tests__/` and `__fixtures__/`. Ignore `ui/node_modules/`.
+
+### Pages render inside `PageContext`
+
+A Pageflow page reads its props through `usePage()`, which **throws** on an
+empty context — so `render(<Page {...props} />)` renders nothing. The scaffold
+wraps the page in `PageContext.Provider` with the whole fixture, which is the
+same object `<App>` supplies at runtime. (`PageContext` is exported from
+`@pageflow/react` for exactly this.)
+
+---
+
 ## Notes
 
 - **One ground at a time, per process, is the supported mode.** `Paths` is a
@@ -487,6 +711,10 @@ when enabling the plugin, without having to wire a project up to see it.
 ```bash
 composer install
 vendor/bin/phpunit
+```
+
+```
+118 tests, 210 assertions
 ```
 
 The suite boots a real fixture plugin (`tests/Fixtures/Sample`) and asserts the

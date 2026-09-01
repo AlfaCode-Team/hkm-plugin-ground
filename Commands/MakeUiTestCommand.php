@@ -7,6 +7,7 @@ namespace Plugins\Ground\Commands;
 use AlfacodeTeam\PhpIoCli\AbstractCommand;
 use Plugins\Ground\Inspection\PluginLocator;
 use Plugins\Ground\Ui\UiManifest;
+use Plugins\Ground\Ui\UiWorkspace;
 
 /**
  * make:ui-test <plugin> — scaffold the component-test side of a plugin's UI.
@@ -23,26 +24,27 @@ use Plugins\Ground\Ui\UiManifest;
  */
 final class MakeUiTestCommand extends AbstractCommand
 {
+    use ResolvesPlugin;
+
     protected function configure(): void
     {
         $this->name        = 'make:ui-test';
         $this->description = 'Scaffold vitest component tests for a plugin\'s pages';
 
-        $this->addArgument('plugin', 'Plugin name from module.json', required: true);
+        $this->addArgument('plugin', 'Plugin name (default: the plugin you are standing in)');
         $this->addOption('force', 'f', 'Overwrite existing files');
         $this->addOption('config', 'c', 'Also write vitest.config.ts and the setup file');
     }
 
     protected function handle(): int
     {
-        $name     = (string) $this->argument('plugin');
-        $manifest = PluginLocator::fromCwd()->find($name);
+        $manifest = $this->resolvePlugin('plugin');
 
         if ($manifest === null) {
-            $this->error("No plugin named '{$name}' under plugins/ or modules/.");
-
             return self::FAILURE;
         }
+
+        $name = $manifest->name();
 
         $ui = UiManifest::for($manifest->directory());
 
@@ -108,6 +110,7 @@ final class MakeUiTestCommand extends AbstractCommand
             // Add `screen` here when you assert on what the user sees:
             //   import { render, screen } from "@testing-library/react";
             import { render } from "@testing-library/react";
+            import { PageContext } from "@pageflow/react";
             import Page from "{$import}";
             import fixture from "../__fixtures__/{$slug}.json";
 
@@ -125,10 +128,29 @@ final class MakeUiTestCommand extends AbstractCommand
              * the page breaks. With the dump, a server-side rename fails it here.
              *
              * Re-dump the fixture when the props change, and commit it.
+             *
+             * The PageContext wrapper is not optional: a Pageflow page reads its props
+             * through `usePage()`, which THROWS on an empty context, so passing props
+             * as JSX attributes renders nothing. The value is the whole page object —
+             * the same thing <App> supplies at runtime, and the same shape the fixture
+             * holds.
              */
-            describe("{$component}", () => {
+            function renderPage() {
+              return render(
+                <PageContext.Provider value={fixture as any}>
+                  <Page />
+                </PageContext.Provider>,
+              );
+            }
+
+            // A fixture that has never been dumped is a PLACEHOLDER: skip loudly
+            // rather than assert against empty props, which fails somewhere inside
+            // the component and reads like the page is broken.
+            const pending = (fixture as any).__placeholder === true;
+
+            describe.skipIf(pending)("{$component}", () => {
               it("renders with the props the server actually sends", () => {
-                render(<Page {...(fixture.props as any)} />);
+                renderPage();
 
                 // Replace with something the page must show. Prefer a role or a
                 // user-visible string over a test id: an assertion on markup
@@ -151,36 +173,108 @@ final class MakeUiTestCommand extends AbstractCommand
 
             TSX);
 
+        $this->seedPlaceholderFixture($ui, $slug, $component);
         $this->success('wrote ' . $slug . '.test.tsx');
 
         return true;
     }
 
-    private function writeConfig(UiManifest $ui): bool
+    /**
+     * A stand-in fixture, so the suite RUNS before anything has been dumped.
+     *
+     * Without a file there, the test's `import fixture from "…"` is a build
+     * error that takes the whole vitest run down and names a path rather than a
+     * cause. With one, the page's tests report as skipped and the reason is in
+     * the file. Never overwrites a real dump — `__placeholder` is what tells
+     * them apart, and a dumped fixture does not carry it.
+     */
+    private function seedPlaceholderFixture(UiManifest $ui, string $slug, string $component): void
     {
-        $file = $ui->directory . '/vitest.config.ts';
+        $path = $ui->directory . '/__fixtures__/' . $slug . '.json';
 
-        if (is_file($file) && !$this->hasOption('force')) {
-            $this->muted('skipped (exists): vitest.config.ts');
-
-            return false;
+        if (is_file($path)) {
+            return;
         }
 
-        file_put_contents($file, <<<'TS'
+        $dir = \dirname($path);
+        if (!is_dir($dir) && !mkdir($dir, 0o755, true) && !is_dir($dir)) {
+            return;
+        }
+
+        file_put_contents($path, json_encode([
+            '__placeholder' => true,
+            '//'            => "Dump the real props with: \$this->ground()->pageflow('/route')"
+                . "->writeFixture(__DIR__ . '/../ui/__fixtures__/{$slug}.json'); "
+                . 'until then this page\'s tests are skipped.',
+            'component'     => $component,
+            'props'         => new \stdClass(),
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+    }
+
+    /**
+     * The files that make `npx vitest` actually run: a package.json, and a
+     * vitest config whose aliases resolve to the checkouts on disk.
+     *
+     * Both were missing. The old config carried a docblock conceding that
+     * "@pageflow … are NOT resolvable here", which for a plugin like `user` —
+     * where EVERY page imports @pageflow/admin and @ui/* — meant the scaffolded
+     * tests could not run at all. And with no package.json there was nothing to
+     * install into, so `npx vitest` asked to download vitest and stopped.
+     *
+     * {@see UiWorkspace} derives the aliases from the same ui.json declarations
+     * `hkm ui sync` reads, so this stays correct when a plugin adds an export.
+     */
+    private function writeConfig(UiManifest $ui): bool
+    {
+        $workspace = UiWorkspace::for(\dirname($ui->directory), PluginLocator::fromCwd());
+        $written   = 0;
+
+        $written += $this->writeFile($ui->directory . '/vitest.config.ts', <<<TS
             import { defineConfig } from "vitest/config";
             import react from "@vitejs/plugin-react";
+            import { fileURLToPath } from "node:url";
+            import { resolve } from "node:path";
+
+            // `__dirname` does not exist in an ESM config, and every alias below
+            // is relative to THIS file so the config is committable rather than
+            // pinned to one machine's home directory.
+            const here = (p: string) =>
+              resolve(fileURLToPath(new URL(".", import.meta.url)), p);
 
             /**
-             * Vitest for a PLUGIN's own UI, run in place (plugins/<Name>/ui/).
+             * Vitest for a PLUGIN's own UI, run in place (<plugin>/ui/).
              *
              * A plugin owns its UI and must be testable without a host project —
-             * the same reason `hkm ui sync` mirrors rather than moves it. Aliases
-             * to other plugins (@pageflow, …) are NOT resolvable here; a page that
-             * needs them belongs in a project-level test, where
-             * tsconfig.plugins.json supplies them.
+             * the same reason `hkm ui sync` mirrors rather than moves it. The
+             * aliases below are the sibling checkouts on THIS machine, written
+             * by `make:ui-test --config`; re-run it when a plugin is added or
+             * moved. In a project these same names come from
+             * tsconfig.plugins.json instead.
              */
             export default defineConfig({
               plugins: [react()],
+              // esbuild otherwise discovers the tsconfig.json NEAREST each file it
+              // transforms. For the shared @ui kit that is the kernel's frontend
+              // template, whose tsconfig extends ./tsconfig.plugins.json — a file
+              // `hkm ui sync` generates INTO A PROJECT and which therefore does not
+              // exist in the template. Declaring the options inline stops the
+              // lookup entirely, so no file outside this plugin can decide how its
+              // UI compiles.
+              esbuild: {
+                tsconfigRaw: {
+                  compilerOptions: {
+                    jsx: "react-jsx",
+                    target: "es2022",
+                    useDefineForClassFields: true,
+                    verbatimModuleSyntax: false,
+                  },
+                },
+              },
+              resolve: {
+                alias: {
+            {$workspace->toViteAliases($ui->directory)}
+                },
+              },
               test: {
                 environment: "jsdom",
                 globals: true,
@@ -188,27 +282,88 @@ final class MakeUiTestCommand extends AbstractCommand
                 include: ["__tests__/**/*.test.{ts,tsx}"],
               },
             });
-            TS);
+            TS) ? 1 : 0;
 
-        $setup = $ui->directory . '/__tests__/setup.ts';
-        if (!is_dir(\dirname($setup))) {
-            mkdir(\dirname($setup), 0o755, true);
+        $written += $this->writeFile($ui->directory . '/package.json', $this->packageJson($workspace)) ? 1 : 0;
+
+        $written += $this->writeFile($ui->directory . '/__tests__/setup.ts', <<<'TS'
+            import "@testing-library/jest-dom/vitest";
+            import { cleanup } from "@testing-library/react";
+            import { afterEach } from "vitest";
+
+            // Without this, a component left mounted by one test is still in the
+            // document for the next, and a passing assertion may be reading the
+            // previous test's render.
+            afterEach(() => cleanup());
+            TS) ? 1 : 0;
+
+        if ($written > 0) {
+            $this->newLine();
+            $this->muted('Install once:  cd ' . $ui->directory . ' && npm install');
         }
-        if (!is_file($setup) || $this->hasOption('force')) {
-            file_put_contents($setup, <<<'TS'
-                import "@testing-library/jest-dom/vitest";
-                import { cleanup } from "@testing-library/react";
-                import { afterEach } from "vitest";
 
-                // Without this, a component left mounted by one test is still in the
-                // document for the next, and a passing assertion may be reading the
-                // previous test's render.
-                afterEach(() => cleanup());
-                TS);
+        return $written > 0;
+    }
+
+    /**
+     * package.json for the plugin's ui/.
+     *
+     * `"private": true` and `"type": "module"` are both load-bearing: without
+     * private, npm warns about publishing on every command, and without module
+     * the .ts config is parsed as CommonJS and `export default` is a syntax
+     * error.
+     *
+     * The runtime dependencies are whatever the plugins whose aliases we just
+     * wired declare in their own ui.json — rendering an admin page without
+     * `lucide-react` fails on the first icon, and guessing that list is how it
+     * goes stale.
+     */
+    private function packageJson(UiWorkspace $workspace): string
+    {
+        $package = [
+            'name'    => 'plugin-ui-tests',
+            'private' => true,
+            'type'    => 'module',
+            'scripts' => [
+                'test'  => 'vitest run',
+                'watch' => 'vitest',
+            ],
+            'dependencies'    => $workspace->dependencies === [] ? new \stdClass() : $workspace->dependencies,
+            'devDependencies' => [
+                '@testing-library/jest-dom' => '^6.6.0',
+                '@testing-library/react'    => '^16.1.0',
+                '@types/react'              => '^19.0.0',
+                '@types/react-dom'          => '^19.0.0',
+                '@vitejs/plugin-react'      => '^5.0.0',
+                'jsdom'                     => '^26.0.0',
+                'react'                     => '^19.0.0',
+                'react-dom'                 => '^19.0.0',
+                'typescript'                => '^5.7.0',
+                'vitest'                    => '^3.0.0',
+            ],
+        ];
+
+        return json_encode($package, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+    }
+
+    /** Write unless it exists and --force was not given. */
+    private function writeFile(string $path, string $contents): bool
+    {
+        if (is_file($path) && !$this->hasOption('force')) {
+            $this->muted('skipped (exists): ' . basename($path));
+
+            return false;
         }
 
-        $this->success('wrote vitest.config.ts + __tests__/setup.ts');
-        $this->muted('npm i -D vitest jsdom @vitejs/plugin-react @testing-library/react @testing-library/jest-dom');
+        $dir = \dirname($path);
+        if (!is_dir($dir) && !mkdir($dir, 0o755, true) && !is_dir($dir)) {
+            $this->error("Could not create {$dir}.");
+
+            return false;
+        }
+
+        file_put_contents($path, $contents);
+        $this->success('wrote ' . basename($path));
 
         return true;
     }

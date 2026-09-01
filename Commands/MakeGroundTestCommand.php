@@ -17,24 +17,23 @@ use Plugins\Ground\Inspection\PluginLocator;
  */
 final class MakeGroundTestCommand extends AbstractCommand
 {
+    use ResolvesPlugin;
+
     protected function configure(): void
     {
         $this->name        = 'make:ground-test';
         $this->description = 'Scaffold a PluginGround test case from a plugin\'s manifest';
 
-        $this->addArgument('plugin', 'Plugin name from module.json', required: true);
+        $this->addArgument('plugin', 'Plugin name (default: the plugin you are standing in)');
         $this->addOption('force', 'f', 'Overwrite an existing file');
         $this->addOption('print', 'p', 'Write to stdout instead of a file');
     }
 
     protected function handle(): int
     {
-        $name     = (string) $this->argument('plugin');
-        $manifest = PluginLocator::fromCwd()->find($name);
+        $manifest = $this->resolvePlugin('plugin');
 
         if ($manifest === null) {
-            $this->error("No plugin named '{$name}' under plugins/ or modules/.");
-
             return self::FAILURE;
         }
 
@@ -67,6 +66,17 @@ final class MakeGroundTestCommand extends AbstractCommand
 
         $this->success("Wrote {$path}");
         $this->muted('Run it with: vendor/bin/phpunit ' . $path);
+
+        // The file extends PluginGroundTestCase, so the harness has to BE
+        // there. A plugin that has never been tested does not declare it, and
+        // the resulting "class not found" reads as a broken scaffolder rather
+        // than a missing dev dependency.
+        if (!class_exists(\Plugins\Ground\Ground\PluginGroundTestCase::class)) {
+            $this->newLine();
+            $this->warning('The ground harness is not installed in this plugin.');
+            $this->muted('  bin/link-local            — for local development, touches no tracked file');
+            $this->muted('  composer require --dev alfacode-team/hkm-plugin-ground   — to keep the tests');
+        }
 
         return self::SUCCESS;
     }
@@ -145,15 +155,7 @@ final class MakeGroundTestCommand extends AbstractCommand
             );
         }
 
-        $requires = $manifest->requires();
-        $deps     = $requires === []
-            ? ''
-            : "\n    /**\n     * Providers for: " . implode(', ', $requires) . "\n     *\n"
-              . "     * Every required domain must be registered or the boot fails — that is\n"
-              . "     * the kernel enforcing the dependency, not the harness being strict.\n"
-              . "     */\n"
-              . "    protected function dependencies(): array\n    {\n"
-              . "        return [\n            // Plugins\\\\Example\\\\Provider::class,\n        ];\n    }\n";
+        $deps = $this->renderDependencies($manifest);
 
         $body = implode("\n\n", $tests);
 
@@ -184,6 +186,46 @@ final class MakeGroundTestCommand extends AbstractCommand
         }
 
         PHP;
+    }
+
+    /**
+     * The `dependencies()` override, RESOLVED — not a placeholder comment.
+     *
+     * The locator already knows which installed plugin solves each domain (it
+     * is how `plugin:probe` boots one), so emitting `// Plugins\Example\...`
+     * and leaving the author to look them up was throwing away an answer this
+     * command already had. A scaffold whose first run fails on a missing
+     * dependency teaches nothing except that scaffolds do not work.
+     *
+     * Unresolvable domains are still listed, as a comment naming the domain —
+     * that IS the useful output when the providing plugin is not installed.
+     */
+    private function renderDependencies(\Plugins\Ground\Ground\PluginManifest $manifest): string
+    {
+        $requires = $manifest->requires();
+
+        if ($requires === []) {
+            return '';
+        }
+
+        ['providers' => $providers, 'missing' => $missing] = PluginLocator::fromCwd()->dependenciesFor($manifest);
+
+        $lines = [];
+        foreach ($providers as $provider) {
+            $lines[] = '            \\' . $provider . '::class,';
+        }
+        foreach ($missing as $domain) {
+            $lines[] = "            // no installed plugin solves '{$domain}' — the boot will fail until one does";
+        }
+
+        $body = $lines === [] ? '            //' : implode("\n", $lines);
+
+        return "\n    /**\n     * Providers for: " . implode(', ', $requires) . "\n     *\n"
+            . "     * Every required domain must be registered or the boot fails — that is\n"
+            . "     * the kernel enforcing the dependency, not the harness being strict.\n"
+            . "     */\n"
+            . "    protected function dependencies(): array\n    {\n"
+            . "        return [\n" . $body . "\n        ];\n    }\n";
     }
 
     private function studly(string $value): string
