@@ -1,6 +1,6 @@
 {
     "name": "alfacode-team/hkm-plugin-ground",
-    "description": "HKM Kernel plugin providing 'dev.ground' — a test bench for developing and testing plugins.",
+    "description": "Compatibility package for 'dev.ground', which now ships inside the HKM kernel (modules/ground). Keeps the old Plugins\\Ground\\ names resolving to the kernel's harness.",
     "type": "library",
     "license": "MIT",
     "keywords": [
@@ -15,11 +15,8 @@
         "alfacode-team/php-service-platform": "dev-master"
     },
     "autoload": {
-        "psr-4": {
-            "Plugins\\Ground\\": ""
-        },
-        "exclude-from-classmap": [
-            "tests/"
+        "files": [
+            "aliases.php"
         ]
     },
     "autoload-dev": {

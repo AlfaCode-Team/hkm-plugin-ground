@@ -13,10 +13,7 @@
     </testsuites>
     <source>
         <include>
-            <directory suffix=".php">Ground</directory>
-            <directory suffix=".php">Fakes</directory>
-            <directory suffix=".php">Inspection</directory>
-            <directory suffix=".php">Commands</directory>
+            <file>aliases.php</file>
         </include>
     </source>
 </phpunit>
